@@ -66,6 +66,7 @@ target = None
 target_current_section = None
 target_first_in_section: datetime = None
 running = False
+fire_detected = False
 
 fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
 fire_model.conf = 0.5
@@ -88,13 +89,10 @@ def action_right():
 
 
 def action_extinguish():
-    print("Down")
+    print("Extinguish")
     socketio.emit("serial", "9")
-    # socketio.emit("serial", "0")
-    # socketio.emit("serial", "7")
-    # socketio.emit("serial", "6")
-    # socketio.emit("serial", "0")
-    
+
+
 def action_stop():
     print("Stop")
     socketio.emit("serial", "0")
@@ -105,6 +103,7 @@ def process_frame(frame):
     global target_current_section
     global target_first_in_section
     global running
+    global fire_detected
 
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     frame = cv2.resize(frame, (640, 480))
@@ -176,19 +175,30 @@ def process_frame(frame):
 
         section = data_use["section"]
         area = data_use["area"]
-        
+
         print("Current Target: ", new_target)
         print("Section: ", section)
         print("Area: ", area)
-        
+
+        proceed = True
+
+        if fire_detected and valid_fire_data is not None:
+            action_extinguish()
+            proceed = False
+        else:
+            fire_detected = False
+
         if running and area < STOP_AT_AREA:
             action_stop()
             running = False
-            
+
             target = None
             target_current_section = None
             target_first_in_section = None
-        else:
+
+            proceed = False
+
+        if proceed:
             if not target:
                 target = new_target
                 target_first_in_section = datetime.now()
@@ -196,7 +206,7 @@ def process_frame(frame):
             else:
                 if target == new_target:
                     if target_current_section == section:
-                        if section =="middle" and area >= STOP_AT_AREA:
+                        if section == "middle" and area >= STOP_AT_AREA:
                             action_stop()
                         else:
                             now = datetime.now()
@@ -204,6 +214,7 @@ def process_frame(frame):
                             if elapsed.seconds >= WAIT_FOR_SECONDS:
                                 if section == "middle":
                                     if new_target == "fire" and area >= EXTINGUISH_AT_AREA:
+                                        fire_detected = True
                                         action_extinguish()
                                     else:
                                         action_forward()
@@ -228,12 +239,10 @@ def process_frame(frame):
             if elapsed.seconds > 1:
                 action_stop()
                 running = False
-        
+
         target = None
         target_current_section = None
         target_first_in_section = None
-        
-        
 
     ret, buffer = cv2.imencode(".jpg", frame)
 
