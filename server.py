@@ -20,12 +20,10 @@ socketio = SocketIO(app)
 FIRE_BOX_COLOR = (0, 0, 255)
 VEST_BOX_COLOR = (137, 87, 163)
 HOUSE_BOX_COLOR = (56, 57, 83)
-WAIT_FOR_SECONDS = 3
-DETECT_AREA = 1000
-STOP_AT_AREA = 10000
-EXTINGUISH_AT_AREA = 8000
-
-assert EXTINGUISH_AT_AREA < STOP_AT_AREA, "Extinguish area should be less than Stop Area"
+WAIT_FOR_SECONDS = 1
+DETECT_AREA = 500
+STOP_AT_AREA = 4_000
+EXTINGUISH_AT_AREA = 3_000
 
 
 def get_rect_horizontal_section(frame_width, x, w):
@@ -67,35 +65,38 @@ fire_cascade = cv2.CascadeClassifier("fire_mushiq.xml")
 target = None
 target_current_section = None
 target_first_in_section: datetime = None
+running = False
 
 fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
-fire_model.conf = 0.2
+fire_model.conf = 0.5
 fire_model.iou = 0.2
 
 
 def action_forward():
     print("Forward")
-    socketio.emit("serial", "5")
     socketio.emit("serial", "1")
 
 
 def action_left():
     print("Left")
     socketio.emit("serial", "3")
-    socketio.emit("serial", "1")
 
 
 def action_right():
     print("Right")
-    socketio.emit("serial", "6")
-    socketio.emit("serial", "1")
+    socketio.emit("serial", "4")
 
 
 def action_extinguish():
     print("Down")
-    socketio.emit("serial", "0")
-    socketio.emit("serial", "7")
-    socketio.emit("serial", "6")
+    socketio.emit("serial", "9")
+    # socketio.emit("serial", "0")
+    # socketio.emit("serial", "7")
+    # socketio.emit("serial", "6")
+    # socketio.emit("serial", "0")
+    
+def action_stop():
+    print("Stop")
     socketio.emit("serial", "0")
 
 
@@ -103,6 +104,7 @@ def process_frame(frame):
     global target
     global target_current_section
     global target_first_in_section
+    global running
 
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     frame = cv2.resize(frame, (640, 480))
@@ -131,7 +133,7 @@ def process_frame(frame):
         area = cv2.contourArea(largest_cnt)
         section = get_rect_horizontal_section(width, x, w)
 
-        if area >= DETECT_AREA and area <= STOP_AT_AREA:
+        if area >= DETECT_AREA:
             cv2.rectangle(frame, (x, y), (x + w, y + h), VEST_BOX_COLOR, 2)
             data = {
                 "area": area,
@@ -151,11 +153,11 @@ def process_frame(frame):
         if fire_df.empty:
             continue
 
+        x, y, w, h = get_bounding_box(fire_df["xmin"], fire_df["ymin"], fire_df["xmax"], fire_df["ymax"])
+        cv2.rectangle(frame, (x, y), (x+w, y+h), FIRE_BOX_COLOR, 2)
+        section = get_rect_horizontal_section(width, x, w)
+        area = w * h
         if area >= DETECT_AREA:
-            x, y, w, h = get_bounding_box(fire_df["xmin"], fire_df["ymin"], fire_df["xmax"], fire_df["ymax"])
-            cv2.rectangle(frame, (x, y), (x+w, y+h), FIRE_BOX_COLOR, 2)
-            section = get_rect_horizontal_section(width, x, w)
-            area = w * h
             data = {
                 "area": area,
                 "x": x, "y": y,
@@ -174,41 +176,64 @@ def process_frame(frame):
 
         section = data_use["section"]
         area = data_use["area"]
-
+        
         print("Current Target: ", new_target)
         print("Section: ", section)
         print("Area: ", area)
-
-        if not target:
-            target = new_target
-            target_first_in_section = datetime.now()
-            target_current_section = section
+        
+        if running and area < STOP_AT_AREA:
+            action_stop()
+            running = False
+            
+            target = None
+            target_current_section = None
+            target_first_in_section = None
         else:
-            if target == new_target:
-                if target_current_section == section:
-                    now = datetime.now()
-                    elapsed = now - target_first_in_section
-                    if elapsed.seconds >= WAIT_FOR_SECONDS:
-                        if section == "middle":
-                            if new_target == "fire" and area >= EXTINGUISH_AT_AREA:
-                                action_extinguish()
-                            else:
-                                action_forward()
-                        elif section == "left":
-                            action_left()
-                        elif section == "right":
-                            action_right()
+            if not target:
+                target = new_target
+                target_first_in_section = datetime.now()
+                target_current_section = section
+            else:
+                if target == new_target:
+                    if target_current_section == section:
+                        if section =="middle" and area >= STOP_AT_AREA:
+                            action_stop()
+                        else:
+                            now = datetime.now()
+                            elapsed = now - target_first_in_section
+                            if elapsed.seconds >= WAIT_FOR_SECONDS:
+                                if section == "middle":
+                                    if new_target == "fire" and area >= EXTINGUISH_AT_AREA:
+                                        action_extinguish()
+                                    else:
+                                        action_forward()
+                                        running = True
+                                elif section == "left":
+                                    action_left()
+                                    running = True
+                                elif section == "right":
+                                    action_right()
+                                    running = True
+                    else:
+                        target_current_section = section
+                        target_first_in_section = datetime.now()
                 else:
+                    target = new_target
                     target_current_section = section
                     target_first_in_section = datetime.now()
-            else:
-                target = new_target
-                target_current_section = section
-                target_first_in_section = datetime.now()
     else:
+        if target_first_in_section:
+            now = datetime.now()
+            elapsed = now - target_first_in_section
+            if elapsed.seconds > 1:
+                action_stop()
+                running = False
+        
         target = None
         target_current_section = None
         target_first_in_section = None
+        
+        
 
     ret, buffer = cv2.imencode(".jpg", frame)
 
