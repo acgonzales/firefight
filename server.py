@@ -1,5 +1,4 @@
 from datetime import datetime
-import time
 
 from flask import Flask, render_template
 from flask_socketio import SocketIO
@@ -16,10 +15,10 @@ app = Flask(__name__,
 app.config["SECRET_KEY"] = "firefighter"
 socketio = SocketIO(app)
 
+fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
+fire_model.conf = 0.15
+fire_model.iou = 0.2
 
-FIRE_BOX_COLOR = (0, 0, 255)
-VEST_BOX_COLOR = (137, 87, 163)
-HOUSE_BOX_COLOR = (56, 57, 83)
 WAIT_FOR_SECONDS = 1
 DETECT_AREA = 500
 STOP_AT_AREA = 4_000
@@ -54,23 +53,24 @@ def get_bounding_box(xmin, ymin, xmax, ymax):
     return int(xmin.iloc[0]), int(ymin.iloc[0]), int(width.iloc[0]), int(height.iloc[0])
 
 
-lower_purple = np.array([120, 50, 100], dtype=np.uint8)
-upper_purple = np.array([150, 255, 255], dtype=np.uint8)
+def get_limits(color):
+    c = np.uint8([[color]])  # BGR values
+    hsvC = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
 
-lower_maroon = np.array([170, 151, 140], dtype=np.uint8)
-upper_maroon = np.array([83, 57, 56], dtype=np.uint8)
+    hue = hsvC[0][0][0]  # Get the hue value
 
-fire_cascade = cv2.CascadeClassifier("fire_mushiq.xml")
+    # Handle red hue wrap-around
+    if hue >= 165:  # Upper limit for divided red hue
+        lowerLimit = np.array([hue - 10, 100, 100], dtype=np.uint8)
+        upperLimit = np.array([180, 255, 255], dtype=np.uint8)
+    elif hue <= 15:  # Lower limit for divided red hue
+        lowerLimit = np.array([0, 100, 100], dtype=np.uint8)
+        upperLimit = np.array([hue + 10, 255, 255], dtype=np.uint8)
+    else:
+        lowerLimit = np.array([hue - 10, 100, 100], dtype=np.uint8)
+        upperLimit = np.array([hue + 10, 255, 255], dtype=np.uint8)
 
-target = None
-target_current_section = None
-target_first_in_section: datetime = None
-running = False
-fire_detected = False
-
-fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
-fire_model.conf = 0.5
-fire_model.iou = 0.2
+    return lowerLimit, upperLimit
 
 
 def action_forward():
@@ -98,158 +98,187 @@ def action_stop():
     socketio.emit("serial", "0")
 
 
-def process_frame(frame):
-    global target
-    global target_current_section
-    global target_first_in_section
-    global running
-    global fire_detected
+FIRE_BOX_COLOR = (0, 0, 255)
 
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+PURPLE_BASE_COLOR = [214, 112, 218]  # BGR
+lower_purple, upper_purple = get_limits(PURPLE_BASE_COLOR)
+
+YELLOW_BASE_COLOR = [0, 255, 255]  # BGR
+lower_yellow, upper_yellow = get_limits(YELLOW_BASE_COLOR)
+
+FIRE = "fire"
+VEST = "vest"
+HOUSE = "house"
+MOVE_SECONDS = 3
+
+processing = False
+action_start_time: datetime = None
+current_target = None
+
+
+def detect(frame, detection_type: str):
+    width = frame.shape[0]
+
+    if detection_type == FIRE:
+        fires = fire_model(frame, size=640)
+        for xyxy in fires.pandas().xyxy:
+            fire_df = xyxy[xyxy["name"] == "fire"]
+            if fire_df.empty:
+                continue
+            x, y, w, h = get_bounding_box(fire_df["xmin"], fire_df["ymin"], fire_df["xmax"], fire_df["ymax"])
+            section = get_rect_horizontal_section(width, x, w)
+            area = w * h
+            if area >= DETECT_AREA:
+                return {
+                    "area": w * h,
+                    "x": x, "y": y,
+                    "w": w, "h": h,
+                    "section": section,
+                    "color": FIRE_BOX_COLOR
+                }
+    else:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        if detection_type == VEST:
+            vest_mask = cv2.inRange(hsv, lower_purple, upper_purple)
+            vest_contours = cv2.findContours(vest_mask.copy(), cv2.RETR_EXTERNAL,
+                                             cv2.CHAIN_APPROX_SIMPLE)[-2]
+            vest_contours = sorted(vest_contours, key=cv2.contourArea, reverse=True)
+            if vest_contours:
+                vest_detect = vest_contours[0]
+                x, y, w, h = cv2.boundingRect(vest_detect)
+                area = cv2.contourArea(vest_detect)
+                section = get_rect_horizontal_section(width, x, w)
+                if area >= DETECT_AREA:
+                    return {
+                        "area": area,
+                        "x": x, "y": y,
+                        "w": w, "h": h,
+                        "section": section,
+                        "color": PURPLE_BASE_COLOR
+                    }
+        elif detection_type == HOUSE:
+            house_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+            house_contours = cv2.findContours(house_mask.copy(), cv2.RETR_EXTERNAL,
+                                              cv2.CHAIN_APPROX_SIMPLE)[-2]
+            house_contours = sorted(house_contours, key=cv2.contourArea, reverse=True)
+            if house_contours:
+                house_detect = house_contours[0]
+                x, y, w, h = cv2.boundingRect(house_detect)
+                area = cv2.contourArea(house_detect)
+                section = get_rect_horizontal_section(width, x, w)
+                if area >= DETECT_AREA:
+                    return {
+                        "area": area,
+                        "x": x, "y": y,
+                        "w": w, "h": h,
+                        "section": section,
+                        "color": YELLOW_BASE_COLOR
+                    }
+
+    return None
+
+
+def appropriate_action(target: str, detection_data: dict):
+    socketio.emit("announcer", f"Actioning {target}")
+
+    area = detection_data["area"]
+    socketio.emit("announcer", f"Target area: {area}")
+    section = detection_data["section"]
+    socketio.emit("announcer", f"Target section: {section}")
+
+    print(detection_data)
+
+    if section == "middle":
+        if target == FIRE and area >= EXTINGUISH_AT_AREA:
+            socketio.emit("announcer", "Triggering fire extinguisher...")
+            action_extinguish()
+        else:
+            socketio.emit("announcer", "Moving closer...")
+            action_forward()
+    elif section == "left":
+        socketio.emit("announcer", "Going left...")
+        action_left()
+    elif section == "right":
+        socketio.emit("announcer", "Going right...")
+        action_right()
+
+
+def process_frame(frame):
+    global action_start_time
+    global current_target
+
     frame = cv2.resize(frame, (640, 480))
     width, height, _ = frame.shape
-
-    # Calculate section width (all sections are equal)
     section_width = int(width / 3)
+    cv2.line(frame, (section_width, 0), (section_width, height), (0, 255, 0), 2)
+    cv2.line(frame, (3 * section_width, 0), (3 * section_width, height), (0, 255, 0), 2)
 
-    # Draw section separators
-    cv2.line(frame, (section_width, 0), (section_width, height),
-             (0, 255, 0), 2)  # Green line for left section boundary
-    cv2.line(frame, (3 * section_width, 0), (3 * section_width, height),
-             (0, 255, 0), 2)  # Red line for right section boundary
+    def draw_rectangle(frame, detection_data):
+        x = detection_data["x"]
+        y = detection_data["y"]
+        w = detection_data["w"]
+        h = detection_data["h"]
+        cv2.rectangle(frame, (x, y), (x + w, y + h), detection_data["color"], 2)
 
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    if action_start_time:
+        elapsed = datetime.now() - action_start_time
+        if elapsed.seconds < MOVE_SECONDS:
+            socketio.emit("announcer", "Movement lock, skipping frame...")
+            return frame
 
-    vest_mask = cv2.inRange(hsv, lower_purple, upper_purple)
-    vest_cnts = cv2.findContours(vest_mask.copy(), cv2.RETR_EXTERNAL,
-                                 cv2.CHAIN_APPROX_SIMPLE)[-2]
-    vest_cnts = sorted(vest_cnts, key=cv2.contourArea, reverse=True)
-
-    valid_follow_data = None
-    if vest_cnts:
-        largest_cnt = vest_cnts[0]
-        x, y, w, h = cv2.boundingRect(largest_cnt)
-        area = cv2.contourArea(largest_cnt)
-        section = get_rect_horizontal_section(width, x, w)
-
-        if area >= DETECT_AREA:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), VEST_BOX_COLOR, 2)
-            data = {
-                "area": area,
-                "x": x, "y": y,
-                "w": w, "h": h,
-                "section": section,
-            }
-            socketio.emit("vest", data)
-            valid_follow_data = data
-    else:
-        socketio.emit("vest", "No vest in sight")
-
-    fires = fire_model(frame, size=640)
-    valid_fire_data = None
-    for xyxy in fires.pandas().xyxy:
-        fire_df = xyxy[xyxy["name"] == "fire"]
-        if fire_df.empty:
-            continue
-
-        x, y, w, h = get_bounding_box(fire_df["xmin"], fire_df["ymin"], fire_df["xmax"], fire_df["ymax"])
-        cv2.rectangle(frame, (x, y), (x+w, y+h), FIRE_BOX_COLOR, 2)
-        section = get_rect_horizontal_section(width, x, w)
-        area = w * h
-        if area >= DETECT_AREA:
-            data = {
-                "area": area,
-                "x": x, "y": y,
-                "w": w, "h": h,
-                "section": section,
-            }
-            valid_fire_data = data
-
-    if valid_fire_data or valid_follow_data:
-        if valid_fire_data:
-            new_target = "fire"
-            data_use = valid_fire_data
+    if current_target:
+        socketio.emit("announcer", f"Looking for target {current_target}...")
+        detected = detect(frame, current_target)
+        if detected:
+            socketio.emit("announcer", "Target found.")
+            draw_rectangle(frame, detected)
+            appropriate_action(current_target, detected)
+            return frame
         else:
-            new_target = "vest"
-            data_use = valid_follow_data
+            socketio.emit("announcer", "No target found. Looking for next priority")
 
-        section = data_use["section"]
-        area = data_use["area"]
+    socketio.emit("announcer", "Looking for fire...")
+    found_fire = detect(frame, FIRE)
+    if found_fire:
+        socketio.emit("announcer", "Fire found")
+        draw_rectangle(frame, found_fire)
 
-        print("Current Target: ", new_target)
-        print("Section: ", section)
-        print("Area: ", area)
+        action_start_time = datetime.now()
+        appropriate_action(FIRE, found_fire)
+        current_target = FIRE
 
-        proceed = True
+        return frame
 
-        if fire_detected and valid_fire_data is not None:
-            action_extinguish()
-            proceed = False
-        else:
-            fire_detected = False
+    socketio.emit("announcer", "Looking for vest...")
+    found_vest = detect(frame, VEST)
+    if found_vest:
+        socketio.emit("announcer", "Vest found")
+        draw_rectangle(frame, found_vest)
 
-        if running and area < STOP_AT_AREA:
-            action_stop()
-            running = False
+        action_start_time = datetime.now()
+        appropriate_action(VEST, found_vest)
 
-            target = None
-            target_current_section = None
-            target_first_in_section = None
+        current_target = VEST
+        return frame
 
-            proceed = False
+    socketio.emit("announcer", "Looking for house...")
+    found_house = detect(frame, HOUSE)
+    if found_house:
+        socketio.emit("announcer", "House found")
+        draw_rectangle(frame, found_house)
 
-        if proceed:
-            if not target:
-                target = new_target
-                target_first_in_section = datetime.now()
-                target_current_section = section
-            else:
-                if target == new_target:
-                    if target_current_section == section:
-                        if section == "middle" and area >= STOP_AT_AREA:
-                            action_stop()
-                        else:
-                            now = datetime.now()
-                            elapsed = now - target_first_in_section
-                            if elapsed.seconds >= WAIT_FOR_SECONDS:
-                                if section == "middle":
-                                    if new_target == "fire" and area >= EXTINGUISH_AT_AREA:
-                                        fire_detected = True
-                                        action_extinguish()
-                                    else:
-                                        action_forward()
-                                        running = True
-                                elif section == "left":
-                                    action_left()
-                                    running = True
-                                elif section == "right":
-                                    action_right()
-                                    running = True
-                    else:
-                        target_current_section = section
-                        target_first_in_section = datetime.now()
-                else:
-                    target = new_target
-                    target_current_section = section
-                    target_first_in_section = datetime.now()
-    else:
-        if target_first_in_section:
-            now = datetime.now()
-            elapsed = now - target_first_in_section
-            if elapsed.seconds > 1:
-                action_stop()
-                running = False
+        action_start_time = datetime.now()
+        appropriate_action(HOUSE, found_house)
 
-        target = None
-        target_current_section = None
-        target_first_in_section = None
+        current_target = HOUSE
+        return frame
 
-    ret, buffer = cv2.imencode(".jpg", frame)
-
-    valid_fire_data = None
-    valid_follow_data = None
-
-    socketio.emit("frame", buffer.tobytes())
+    socketio.emit("announcer", "Did not find anything, stopping all motors and resetting state.")
+    action_stop()
+    current_target = None
+    action_start_time = None
+    return frame
 
 
 @app.route("/")
@@ -259,63 +288,68 @@ def index():
 
 @socketio.on("raw_frame")
 def handle_new_frame(raw_frame):
-    image = Image.open(io.BytesIO(bytes(raw_frame)))
-    image_np = np.array(image)
-    process_frame(image_np)
+    global processing
+
+    if processing:
+        return
+
+    image_np = np.frombuffer(bytes(raw_frame), dtype=np.uint8)
+    try:
+        processing = True
+        frame = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
+        if frame is not None:
+            result_frame = process_frame(frame)
+            _, buffer = cv2.imencode(".jpg", result_frame)
+            socketio.emit("frame", buffer.tobytes())
+    except:
+        socketio.emit("announcer", "Cant process frame")
+    finally:
+        processing = False
+
+
+def house_tester_img():
+    from pathlib import Path
+    image_folder = Path.home() / "Downloads" / "test images"
+
+    for image in image_folder.glob("*.jpg"):
+        frame = cv2.imread(str(image.absolute()), cv2.IMREAD_UNCHANGED)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (640, 480))
+
+        house_detect = detect(frame, HOUSE)
+        if house_detect:
+            x = house_detect["x"]
+            y = house_detect["y"]
+            w = house_detect["w"]
+            h = house_detect["h"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), YELLOW_BASE_COLOR, 2)
+
+        cv2.imshow(image.name, frame)
+
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def house_tester_camera():
+    cap = cv2.VideoCapture(0)
+    while True:
+        ret, frame = cap.read()
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        house_detect = detect(frame, HOUSE)
+        if house_detect:
+            x = house_detect["x"]
+            y = house_detect["y"]
+            w = house_detect["w"]
+            h = house_detect["h"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), YELLOW_BASE_COLOR, 2)
+
+        cv2.imshow("orig", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=8001, debug=True)
-
-
-# def house_detect(hsv):
-#     house_mask = cv2.inRange(hsv, lower_maroon, upper_maroon)
-#     house_cnts = cv2.findContours(house_mask.copy(), cv2.RETR_EXTERNAL,
-#                                   cv2.CHAIN_APPROX_SIMPLE)[-2]
-#     house_cnts = sorted(house_cnts, key=cv2.contourArea, reverse=True)
-#     valid_house_data = None
-#     if house_cnts:
-#         largest_cnt = house_cnts[0]
-#         x, y, w, h = cv2.boundingRect(largest_cnt)
-#         area = cv2.contourArea(largest_cnt)
-#         section = get_rect_horizontal_section(width, x, w)
-
-#         if area >= min_vest_area:
-#             cv2.rectangle(frame, (x, y), (x + w, y + h), HOUSE_COLOR, 2)
-#             data = {
-#                 "area": area,
-#                 "x": x, "y": y,
-#                 "w": w, "h": h,
-#                 "section": section,
-#             }
-#             socketio.emit("house", data)
-#             print("House: {}".format(data))
-#             valid_house_data = data
-#     else:
-#         socketio.emit("House", "No house in sight")
-
-    # fires = fire_cascade.detectMultiScale(frame, 1.2, 5)
-    # if fires is not None:
-    #     fires = sorted(fires, key=lambda x: x[2] * x[3], reverse=True)
-
-    # valid_fire_data = None
-    # if fires:
-    #     x, y, w, h = fires[0]
-    #     x = int(x)
-    #     y = int(y)
-    #     w = int(w)
-    #     h = int(h)
-    #     cv2.rectangle(frame, (x, y), (x + w, y + h), FIRE_COLOR, 2)
-    #     area = w * h
-    #     section = get_rect_horizontal_section(width, x, w)
-    #     data = {
-    #         "area": area,
-    #         "x": x, "y": y,
-    #         "w": w, "h": h,
-    #         "section": section,
-    #     }
-    #     socketio.emit("fire", data)
-    #     print("Fire: {}".format(data))
-    #     valid_fire_data = data
-    # else:
-    #     socketio.emit("fire", "No fire in sight")
