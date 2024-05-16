@@ -4,8 +4,6 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO
 import cv2
 import numpy as np
-from PIL import Image
-import io
 import torch
 
 app = Flask(__name__,
@@ -16,7 +14,7 @@ app.config["SECRET_KEY"] = "firefighter"
 socketio = SocketIO(app)
 
 fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
-fire_model.conf = 0.15
+fire_model.conf = 0.2
 fire_model.iou = 0.2
 
 WAIT_FOR_SECONDS = 1
@@ -120,6 +118,7 @@ def detect(frame, detection_type: str):
     width = frame.shape[0]
 
     if detection_type == FIRE:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         fires = fire_model(frame, size=640)
         for xyxy in fires.pandas().xyxy:
             fire_df = xyxy[xyxy["name"] == "fire"]
@@ -354,5 +353,26 @@ def house_tester_camera():
     cv2.destroyAllWindows()
 
 
+def fire_tester():
+    cap = cv2.VideoCapture("videos/sunlight.jpeg")
+    while True:
+        ret, frame = cap.read()
+        house_detect = detect(frame, FIRE)
+        if house_detect:
+            x = house_detect["x"]
+            y = house_detect["y"]
+            w = house_detect["w"]
+            h = house_detect["h"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), FIRE_BOX_COLOR, 2)
+
+        cv2.imshow("orig", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=8001, debug=True)
+    fire_tester()
+    # socketio.run(app, host="0.0.0.0", port=8001, debug=True)
