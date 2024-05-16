@@ -290,11 +290,14 @@ def index():
 def handle_new_frame(raw_frame):
     global processing
 
+    print("Received new frame")
+
     if processing:
         return
 
     image_np = np.frombuffer(bytes(raw_frame), dtype=np.uint8)
     try:
+        print("Processing frame")
         processing = True
         frame = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
         if frame is not None:
