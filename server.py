@@ -14,7 +14,7 @@ app.config["SECRET_KEY"] = "firefighter"
 socketio = SocketIO(app)
 
 fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
-fire_model.conf = 0.2
+fire_model.conf = 0.15
 fire_model.iou = 0.2
 
 WAIT_FOR_SECONDS = 1
@@ -374,5 +374,4 @@ def fire_tester():
 
 
 if __name__ == "__main__":
-    fire_tester()
-    # socketio.run(app, host="0.0.0.0", port=8001, debug=True)
+    socketio.run(app, host="0.0.0.0", port=8001, debug=True)
