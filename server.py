@@ -14,7 +14,7 @@ app.config["SECRET_KEY"] = "firefighter"
 socketio = SocketIO(app)
 
 fire_model = torch.hub.load("yolov5", "custom", source="local", path="models/fire_best.pt")
-fire_model.conf = 0.15
+fire_model.conf = 0.4
 fire_model.iou = 0.2
 
 WAIT_FOR_SECONDS = 1
@@ -341,21 +341,13 @@ def vest_tester_img():
         # frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         frame = cv2.resize(frame, (640, 480))
 
-        vest_detect = detect(frame, VEST)
+        vest_detect = detect(frame, FIRE)
         if vest_detect:
             x = vest_detect["x"]
             y = vest_detect["y"]
             w = vest_detect["w"]
             h = vest_detect["h"]
             cv2.rectangle(frame, (x, y), (x + w, y + h), VEST_BASE_COLOR, 2)
-
-        house_detect = detect(frame, HOUSE)
-        if house_detect:
-            x = house_detect["x"]
-            y = house_detect["y"]
-            w = house_detect["w"]
-            h = house_detect["h"]
-            cv2.rectangle(frame, (x, y), (x + w, y + h), FIRE_BOX_COLOR, 2)
 
         cv2.imshow(image.name, frame)
 
