@@ -98,11 +98,11 @@ def action_stop():
 
 FIRE_BOX_COLOR = (0, 0, 255)
 
-PURPLE_BASE_COLOR = [214, 112, 218]  # BGR
-lower_purple, upper_purple = get_limits(PURPLE_BASE_COLOR)
+VEST_BASE_COLOR = [2, 255, 174]  # BGR
+lower_vest_color, upper_vest_color = get_limits(VEST_BASE_COLOR)
 
-YELLOW_BASE_COLOR = [0, 255, 255]  # BGR
-lower_yellow, upper_yellow = get_limits(YELLOW_BASE_COLOR)
+HOUSE_BASE_COLOR = [0, 255, 255]  # BGR
+lower_house_color, upper_house_color = get_limits(HOUSE_BASE_COLOR)
 
 FIRE = "fire"
 VEST = "vest"
@@ -139,7 +139,7 @@ def detect(frame, detection_type: str):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         if detection_type == VEST:
-            vest_mask = cv2.inRange(hsv, lower_purple, upper_purple)
+            vest_mask = cv2.inRange(hsv, lower_vest_color, upper_vest_color)
             vest_contours = cv2.findContours(vest_mask.copy(), cv2.RETR_EXTERNAL,
                                              cv2.CHAIN_APPROX_SIMPLE)[-2]
             vest_contours = sorted(vest_contours, key=cv2.contourArea, reverse=True)
@@ -154,10 +154,10 @@ def detect(frame, detection_type: str):
                         "x": x, "y": y,
                         "w": w, "h": h,
                         "section": section,
-                        "color": PURPLE_BASE_COLOR
+                        "color": VEST_BASE_COLOR
                     }
         elif detection_type == HOUSE:
-            house_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+            house_mask = cv2.inRange(hsv, lower_house_color, upper_house_color)
             house_contours = cv2.findContours(house_mask.copy(), cv2.RETR_EXTERNAL,
                                               cv2.CHAIN_APPROX_SIMPLE)[-2]
             house_contours = sorted(house_contours, key=cv2.contourArea, reverse=True)
@@ -172,7 +172,7 @@ def detect(frame, detection_type: str):
                         "x": x, "y": y,
                         "w": w, "h": h,
                         "section": section,
-                        "color": YELLOW_BASE_COLOR
+                        "color": HOUSE_BASE_COLOR
                     }
 
     return None
@@ -324,7 +324,38 @@ def house_tester_img():
             y = house_detect["y"]
             w = house_detect["w"]
             h = house_detect["h"]
-            cv2.rectangle(frame, (x, y), (x + w, y + h), YELLOW_BASE_COLOR, 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), HOUSE_BASE_COLOR, 2)
+
+        cv2.imshow(image.name, frame)
+
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
+def vest_tester_img():
+    from pathlib import Path
+    image_folder = Path.home() / "Downloads" / "Vest"
+
+    for image in image_folder.glob("*.jpg"):
+        frame = cv2.imread(str(image.absolute()), cv2.IMREAD_UNCHANGED)
+        # frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame = cv2.resize(frame, (640, 480))
+
+        vest_detect = detect(frame, VEST)
+        if vest_detect:
+            x = vest_detect["x"]
+            y = vest_detect["y"]
+            w = vest_detect["w"]
+            h = vest_detect["h"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), VEST_BASE_COLOR, 2)
+
+        house_detect = detect(frame, HOUSE)
+        if house_detect:
+            x = house_detect["x"]
+            y = house_detect["y"]
+            w = house_detect["w"]
+            h = house_detect["h"]
+            cv2.rectangle(frame, (x, y), (x + w, y + h), FIRE_BOX_COLOR, 2)
 
         cv2.imshow(image.name, frame)
 
@@ -343,7 +374,7 @@ def house_tester_camera():
             y = house_detect["y"]
             w = house_detect["w"]
             h = house_detect["h"]
-            cv2.rectangle(frame, (x, y), (x + w, y + h), YELLOW_BASE_COLOR, 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), HOUSE_BASE_COLOR, 2)
 
         cv2.imshow("orig", frame)
 
@@ -354,7 +385,7 @@ def house_tester_camera():
 
 
 def fire_tester():
-    cap = cv2.VideoCapture("videos/sunlight.jpeg")
+    cap = cv2.VideoCapture("videos/input.mp4")
     while True:
         ret, frame = cap.read()
         house_detect = detect(frame, FIRE)
